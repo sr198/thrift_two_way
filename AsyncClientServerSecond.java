@@ -12,65 +12,110 @@ import tutorial.example.twoway.clientService;
 import tutorial.example.twoway.serverService;
 
 import java.io.IOException;
-
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 public class AsyncClientServerSecond {
 
-    public static class LocalClient implements Runnable {
+    //Inner class for server process
+    public static class LocalServer implements Runnable {
         @Override
         public void run() {
-            
+            startListener();
         }
-    }
 
-    private class AsyncLocalServerHandler implements serverService.AsyncIface {
-        private boolean sendMessage = false;
-
-        @Override
-        public void repeatMessage(int interval, AsyncMethodCallback<String> resultHandler) throws TException {
-            if( sendMessage ) {
-                String message = "Some message";
-                resultHandler.onComplete(message);
+        public class LocalServerHandlerAsync implements clientService.AsyncIface {
+            @Override
+            public void receiveMessage(String message, AsyncMethodCallback<Void> resultHandler) throws TException {
+                System.out.println("Message received from server is "+ message);
+                resultHandler.onComplete(null);
             }
         }
 
-        @Override
-        public void stopMessage(AsyncMethodCallback<Void> resultHandler) throws TException {
-            sendMessage = false;
+        public void startListener() {
+            try {
+                TProcessor proc = new clientService.AsyncProcessor<>(new LocalServerHandlerAsync());
+                TNonblockingServerSocket trans_svr = new TNonblockingServerSocket(9096);
+                TServer server =
+                        new THsHaServer(new THsHaServer.Args(trans_svr)
+                                .processor(proc)
+                                .protocolFactory(new TBinaryProtocol.Factory())
+                                .minWorkerThreads(4)
+                                .maxWorkerThreads(4));
+                System.out.println("[Client] listening on port 9096");
+                server.serve();
+            } catch (TTransportException e) {
+                e.printStackTrace();
+            }
         }
     }
+    public static class ClientCallback implements AsyncMethodCallback<String> {
+        private CountDownLatch latch = new CountDownLatch(1);
 
-    public void startListener() {
-        try {
-            TProcessor proc = new serverService.AsyncProcessor<>(new AsyncLocalServerHandler());
-            TNonblockingServerSocket trans_svr = new TNonblockingServerSocket(9090);
-            TServer server =
-                    new THsHaServer(new THsHaServer.Args(trans_svr)
-                            .processor(proc)
-                            .protocolFactory(new TBinaryProtocol.Factory())
-                            .minWorkerThreads(4)
-                            .maxWorkerThreads(4));
-            System.out.println("[Server] listening of port 9090");
-            server.serve();
-        } catch (TTransportException e) {
+        //Synchronization Interface
+        public void reset() { latch = new CountDownLatch(1); }
+        public void complete() { latch.countDown(); }
+        public boolean wait(int i) {
+            boolean b = false;
+            try { b = latch.await(i, TimeUnit.MILLISECONDS); }
+            catch(Exception e) { System.out.println("[Client] await error"); }
+            return b;
+        }
+        @Override
+        public void onComplete(String result) {
+            System.out.print("Message received from server: "+ result );
+        }
+
+        @Override
+        public void onError(Exception e) {
             e.printStackTrace();
         }
     }
 
+    public static class ClientCallback2 implements AsyncMethodCallback<Void> {
+        private CountDownLatch latch = new CountDownLatch(1);
+
+        //Synchronization Interface
+        public void reset() { latch = new CountDownLatch(1); }
+        public void complete() { latch.countDown(); }
+        public boolean wait(int i) {
+            boolean b = false;
+            try { b = latch.await(i, TimeUnit.MILLISECONDS); }
+            catch(Exception e) { System.out.println("[Client] await error"); }
+            return b;
+        }
+        @Override
+        public void onComplete(Void result) {
+            System.out.print("Done" );
+        }
+
+        @Override
+        public void onError(Exception e) {
+            e.printStackTrace();
+        }
+    }
 
     public static void main(String[] args) throws IOException, TException {
-        Thread listeningThread = new Thread(new LocalServer());
-        listeningThread.start();
+        Thread clientServer = new Thread( new LocalServer());
+        clientServer.start();
 
         TAsyncClientManager clientManager = new TAsyncClientManager();
-        TNonblockingSocket socket = new TNonblockingSocket("localhost", 9090);
+        TNonblockingSocket socket = new TNonblockingSocket("localhost", 9095);
         serverService.AsyncClient asyncClient = new serverService.AsyncClient(new TBinaryProtocol.Factory(),
                 clientManager,
                 socket);
-        asyncClient.repeatMessage(5000, null);
+        ClientCallback callback = new ClientCallback();
+        ClientCallback2 callback2 = new ClientCallback2();
+
+        callback.reset();
+        asyncClient.repeatMessage(5000, callback);
+        callback.wait(5000);
+
+        callback.reset();
+        asyncClient.stopMessage(callback2);
+        callback.wait(1000);
 
         clientManager.stop();
         socket.close();
     }
 }
-
